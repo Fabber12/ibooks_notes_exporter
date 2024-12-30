@@ -1,22 +1,24 @@
 package db
 
 import (
-	"database/sql"
+        "database/sql"
 )
 
 type SingleBook struct {
-	Name   string
-	Author string
+        Name   string
+        Author string
 }
 
 type SingleHighlightNote struct {
-	HightLight string
-	Note       sql.NullString
+        HightLight string
+        Note       sql.NullString
+        Style        int // Per ZANNOTATIONSTYLE
+        IsUnderline  int // Per ZANNOTATIONISUNDERLINE
 }
 
 type SingleBookInList struct {
-	Id     string
-	Title  string
-	Author string
-	Number int
+        Id     string
+        Title  string
+        Author string
+        Number int
 }

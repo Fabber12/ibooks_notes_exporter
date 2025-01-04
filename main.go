@@ -8,6 +8,7 @@ import (
 	dbThings "ibooks_notes_exporter/db"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,7 +17,7 @@ func main() {
 		Name:    "Ibooks notes exporter",
 		Usage:   "Export your records from Apple iBooks",
 		Authors: []*cli.Author{{Name: "Andrey Korchak", Email: "me@akorchak.software"}},
-		Version: "v0.0.6",
+		Version: "v0.1.0",
 		Commands: []*cli.Command{
 			{
 				Name:   "books",
@@ -33,13 +34,18 @@ func main() {
 			{
 				Name:      "export",
 				HideHelp:  false,
-				Usage:     "Export all notes and highlights from book with [BOOK_ID]",
+				Usage:     "Export all notes and highlights from book with [BOOK_ID] to the specified directory",
 				UsageText: "Export all notes and highlights from book with [BOOK_ID]",
 				Action:    exportNotesAndHighlights,
-				ArgsUsage: "ibooks_notes_exporter export BOOK_ID_GOES_HERE",
+				ArgsUsage: "ibooks_notes_exporter export BOOK_ID_GOES_HERE --output PATH_TO_DIRECTORY",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:     "book_id",
+						Required: true,
+					},
+					&cli.StringFlag{
+						Name:     "output",
+						Usage:    "Directory where the output files will be saved",
 						Required: true,
 					},
 					&cli.IntFlag{
@@ -99,6 +105,16 @@ func exportNotesAndHighlights(cCtx *cli.Context) error {
 
 	bookId := cCtx.String("book_id")
 	skipXNotes := cCtx.Int("skip_first_x_notes")
+	outputDir := cCtx.String("output")
+
+	// Ensure the output directory exists
+	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
+		err := os.MkdirAll(outputDir, os.ModePerm)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	fmt.Println(bookId)
 
 	var book dbThings.SingleBook
@@ -109,13 +125,12 @@ func exportNotesAndHighlights(cCtx *cli.Context) error {
 		log.Fatal("SingleBook is not found in iBooks!")
 	}
 
-	fmt.Println(fmt.Sprintf("# %s — %s\n", book.Name, book.Author))
-
 	rows, err := db.Query(dbThings.GetNotesHighlightsById, bookId, skipXNotes)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	colorFiles := make(map[string]*os.File)
 	var singleHighlightNote dbThings.SingleHighlightNote
 	for rows.Next() {
 		err := rows.Scan(&singleHighlightNote.HightLight, &singleHighlightNote.Note, &singleHighlightNote.Style, &singleHighlightNote.IsUnderline)
@@ -129,14 +144,28 @@ func exportNotesAndHighlights(cCtx *cli.Context) error {
 			typeAnnotation = "Sottolineatura"
 		}
 
-		fmt.Printf("> %s\n\n", strings.Replace(singleHighlightNote.HightLight, "\n", "", -1))
-		fmt.Printf("_Tipo: %s | Colore: %s_\n\n", typeAnnotation, color)
-
-		if singleHighlightNote.Note.Valid {
-			fmt.Printf("%s\n\n", strings.Replace(singleHighlightNote.Note.String, "\n", "", -1))
+		// Open or create a file for the specific color/type in the specified output directory
+		fileName := filepath.Join(outputDir, fmt.Sprintf("%s_%s.md", book.Name, color))
+		if colorFiles[fileName] == nil {
+			file, err := os.Create(fileName)
+			if err != nil {
+				log.Fatal(err)
+			}
+			colorFiles[fileName] = file
 		}
 
-		fmt.Println("---\n\n")
+		file := colorFiles[fileName]
+		if typeAnnotation == "Sottolineatura" {
+			fmt.Fprintf(file, "%s\n\n", strings.Replace(singleHighlightNote.HightLight, "\n", "", -1))
+		} else {
+			// Apply color using markdown syntax for color
+			fmt.Fprintf(file, "<span style=\"color:%s\">%s</span>\n\n", getColorHex(color), strings.Replace(singleHighlightNote.HightLight, "\n", "", -1))
+		}
+	}
+
+	// Close all files
+	for _, file := range colorFiles {
+		file.Close()
 	}
 
 	return nil
@@ -145,17 +174,34 @@ func exportNotesAndHighlights(cCtx *cli.Context) error {
 func getColorName(style int) string {
 	switch style {
 	case 1:
-		return "Blu"
-	case 2:
-		return "Giallo"
-	case 3:
 		return "Verde"
+	case 2:
+		return "Blu"
+	case 3:
+		return "Giallo"
 	case 4:
 		return "Rosa"
 	case 5:
 		return "Viola"
 	default:
-		return "Sconosciuto"
+		return "Sottolineato"
+	}
+}
+
+func getColorHex(color string) string {
+	switch color {
+	case "Blu":
+		return "#0077ff"
+	case "Giallo":
+		return "#ffb700"
+	case "Verde":
+		return "#67e600"
+	case "Rosa":
+		return "#f56ca3"
+	case "Viola":
+		return "#c603fc"
+	default:
+		return "#000000"
 	}
 }
 

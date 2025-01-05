@@ -14,4 +14,5 @@
 .DS_Store
 .idea
 dist
+ibooks_notes_exporter
 output/*

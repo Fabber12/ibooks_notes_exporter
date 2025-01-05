@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"github.com/jedib0t/go-pretty/v6/table"
 	_ "github.com/mattn/go-sqlite3"
@@ -8,7 +9,6 @@ import (
 	dbThings "ibooks_notes_exporter/db"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -17,7 +17,7 @@ func main() {
 		Name:    "Ibooks notes exporter",
 		Usage:   "Export your records from Apple iBooks",
 		Authors: []*cli.Author{{Name: "Andrey Korchak", Email: "me@akorchak.software"}},
-		Version: "v0.1.0",
+		Version: "v0.3.3",
 		Commands: []*cli.Command{
 			{
 				Name:   "books",
@@ -34,10 +34,10 @@ func main() {
 			{
 				Name:      "export",
 				HideHelp:  false,
-				Usage:     "Export all notes and highlights from book with [BOOK_ID] to the specified directory",
+				Usage:     "Export all notes and highlights from book with [BOOK_ID] to Markdown files",
 				UsageText: "Export all notes and highlights from book with [BOOK_ID]",
 				Action:    exportNotesAndHighlights,
-				ArgsUsage: "ibooks_notes_exporter export BOOK_ID_GOES_HERE --output PATH_TO_DIRECTORY",
+				ArgsUsage: "ibooks_notes_exporter export BOOK_ID_GOES_HERE",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:     "book_id",
@@ -45,13 +45,8 @@ func main() {
 					},
 					&cli.StringFlag{
 						Name:     "output",
-						Usage:    "Directory where the output files will be saved",
-						Required: true,
-					},
-					&cli.IntFlag{
-						Name:     "skip_first_x_notes",
-						Value:    0,
-						Required: false,
+						Usage:    "Output directory for Markdown files",
+						Value:    "output",
 					},
 				},
 			},
@@ -104,7 +99,6 @@ func exportNotesAndHighlights(cCtx *cli.Context) error {
 	defer db.Close()
 
 	bookId := cCtx.String("book_id")
-	skipXNotes := cCtx.Int("skip_first_x_notes")
 	outputDir := cCtx.String("output")
 
 	// Ensure the output directory exists
@@ -115,93 +109,89 @@ func exportNotesAndHighlights(cCtx *cli.Context) error {
 		}
 	}
 
-	fmt.Println(bookId)
+	notesFile, err := os.Create(fmt.Sprintf("%s/ibooks_extracted_notes.md", outputDir))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer notesFile.Close()
+
+	vocabFile, err := os.Create(fmt.Sprintf("%s/ibooks_vocabulary.md", outputDir))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer vocabFile.Close()
 
 	var book dbThings.SingleBook
 	row := db.QueryRow(dbThings.GetBookDataById, bookId)
-	err := row.Scan(&book.Name, &book.Author)
+	err = row.Scan(&book.Name, &book.Author)
 	if err != nil {
 		log.Println(err)
 		log.Fatal("SingleBook is not found in iBooks!")
 	}
 
-	rows, err := db.Query(dbThings.GetNotesHighlightsById, bookId, skipXNotes)
+	fmt.Fprintf(notesFile, "# %s – Estratto delle evidenziazioni\n\n", book.Name)
+	fmt.Fprintf(notesFile, "<!--\nT = Titolo: Indica un capitolo, sezione o sottosezione del libro.\nD = Nota discorsiva: Spiegazioni estese, metafore o esempi che arricchiscono il testo.\nP = Termine tecnico: Concetti o termini specialistici rilevanti per il contenuto.\nN = Nota importante: Concetti chiave o informazioni cruciali da ricordare.\nU = Sottolineatura significativa: Frasi o concetti evidenziati per il loro impatto o rilevanza.\n-->\n\n")
+	fmt.Fprintf(vocabFile, "# %s – Vocabolario\n\n", book.Name)
+
+	rows, err := db.Query(dbThings.GetNotesHighlightsByIdWithContext, bookId, 0)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	colorFiles := make(map[string]*os.File)
-	var singleHighlightNote dbThings.SingleHighlightNote
+	index := 1
+	vocabIndex := 1
 	for rows.Next() {
-		err := rows.Scan(&singleHighlightNote.HightLight, &singleHighlightNote.Note, &singleHighlightNote.Style, &singleHighlightNote.IsUnderline)
-		if err != nil {
+		var highlight sql.NullString
+		var note sql.NullString
+		var context sql.NullString
+		var style, isUnderline int
+		if err := rows.Scan(&highlight, &note, &context, &style, &isUnderline); err != nil {
 			log.Fatal(err)
 		}
 
-		color := getColorName(singleHighlightNote.Style)
-		typeAnnotation := "Evidenziatura"
-		if singleHighlightNote.IsUnderline == 1 {
-			typeAnnotation = "Sottolineatura"
+		if !highlight.Valid {
+			continue
 		}
 
-		// Open or create a file for the specific color/type in the specified output directory
-		fileName := filepath.Join(outputDir, fmt.Sprintf("%s_%s.md", book.Name, color))
-		if colorFiles[fileName] == nil {
-			file, err := os.Create(fileName)
-			if err != nil {
-				log.Fatal(err)
+		label := classifyHighlight(style, isUnderline)
+		if label == "[Y]" {
+			// Write yellow highlights to vocabulary file
+			fmt.Fprintf(vocabFile, "%d. %s\n", vocabIndex, strings.Replace(highlight.String, "\n", "", -1))
+			if context.Valid {
+				fmt.Fprintf(vocabFile, "   Sentence: %s\n\n", strings.Replace(context.String, "\n", "", -1))
 			}
-			colorFiles[fileName] = file
+			vocabIndex++
+			continue
 		}
 
-		file := colorFiles[fileName]
-		if typeAnnotation == "Sottolineatura" {
-			fmt.Fprintf(file, "%s\n\n", strings.Replace(singleHighlightNote.HightLight, "\n", "", -1))
-		} else {
-			// Apply color using markdown syntax for color
-			fmt.Fprintf(file, "<span style=\"color:%s\">%s</span>\n\n", getColorHex(color), strings.Replace(singleHighlightNote.HightLight, "\n", "", -1))
+		// Write other highlights to the notes file
+		fmt.Fprintf(notesFile, "%d. %s \"%s\"\n\n", index, label, strings.Replace(highlight.String, "\n", "", -1))
+		if note.Valid {
+			fmt.Fprintf(notesFile, "\tNota: %s\n\n", note.String)
 		}
-	}
-
-	// Close all files
-	for _, file := range colorFiles {
-		file.Close()
+		index++
 	}
 
 	return nil
 }
 
-func getColorName(style int) string {
+func classifyHighlight(style, isUnderline int) string {
+	if isUnderline == 1 {
+		return "[U]"
+	}
 	switch style {
 	case 1:
-		return "Verde"
+		return "[P]" // Verde - Punto pratico
 	case 2:
-		return "Blu"
+		return "[D]" // Blu - Definizione
 	case 3:
-		return "Giallo"
+		return "[Y]" // Giallo - Vocaboli
 	case 4:
-		return "Rosa"
+		return "[N]" // Rosa - Nota generale
 	case 5:
-		return "Viola"
+		return "[T]" // Viola - Titoli
 	default:
-		return "Sottolineato"
-	}
-}
-
-func getColorHex(color string) string {
-	switch color {
-	case "Blu":
-		return "#0077ff"
-	case "Giallo":
-		return "#ffb700"
-	case "Verde":
-		return "#67e600"
-	case "Rosa":
-		return "#f56ca3"
-	case "Viola":
-		return "#c603fc"
-	default:
-		return "#000000"
+		return "[U]" // Sottolineato
 	}
 }
 
@@ -225,16 +215,12 @@ func GetLastName(name string) string {
 	words := strings.Fields(name)
 	var lastName string
 	for i := len(words) - 1; i >= 0; i-- {
-		if !isHonorific(words[i]) {
+		if len(words[i]) > 0 {
 			lastName = words[i]
 			break
 		}
 	}
 	lastName = strings.TrimSuffix(lastName, ",")
 	lastName = strings.TrimSuffix(lastName, ".")
-	return "(" + lastName + ")"
-}
-
-func isHonorific(word string) bool {
-	return len(word) <= 3 && (word[len(word)-1] == '.' || word[len(word)-1] == ',')
+	return lastName
 }
